@@ -73,7 +73,12 @@ struct ParserState<'arena> {
     /// detecting that, we simply stop after a while, as LaTeX and KaTeX do. How long that
     /// takes is configurable; see [`crate::MaxExpansions`].
     expansions_left: u32,
+    /// How deeply the token being parsed is nested. See [`Parser::parse_token`].
+    depth: u16,
 }
+
+/// How deeply groups, arguments and environments may nest. TeX's own limit on groups is 255.
+const MAX_NESTING: u16 = 255;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SequenceEnd {
@@ -169,6 +174,7 @@ impl<'state, 'arena> Parser<'state, 'arena> {
                 style,
                 vertical_line_def: None,
                 expansions_left: parser_cfg.max_expansions.0,
+                depth: 0,
             },
         })
     }
@@ -497,6 +503,10 @@ impl<'state, 'arena> Parser<'state, 'arena> {
     /// A token which expands to other tokens is not a node of its own, so we go around again
     /// with the first token of the expansion. This is a loop rather than a tail call, because
     /// one expansion can lead to the next without limit.
+    ///
+    /// Every nested group, argument and environment is parsed through here, so this is also
+    /// where nesting is bounded: each level takes stack, and input nested deeply enough would
+    /// overflow it, which aborts the process instead of returning an error.
     fn parse_token(
         &mut self,
         cur_tokloc: ParseResult<TokSpan>,
@@ -504,12 +514,23 @@ impl<'state, 'arena> Parser<'state, 'arena> {
         prev_class: Class,
     ) -> ParseResult<(Class, &'arena Node<'arena>)> {
         let mut cur_tokloc = cur_tokloc;
-        loop {
-            match self.parse_one_token(cur_tokloc, parse_as, prev_class)? {
-                Parsed::Node(class, node) => return Ok((class, node)),
-                Parsed::Expansion => cur_tokloc = self.next_token(),
-            }
+        if self.state.depth >= MAX_NESTING {
+            let span = cur_tokloc?.span();
+            return Err(Box::new(LatexError(
+                span.into(),
+                LatexErrKind::HardLimitExceeded,
+            )));
         }
+        self.state.depth += 1;
+        let parsed = loop {
+            match self.parse_one_token(cur_tokloc, parse_as, prev_class) {
+                Ok(Parsed::Node(class, node)) => break Ok((class, node)),
+                Ok(Parsed::Expansion) => cur_tokloc = self.next_token(),
+                Err(e) => break Err(e),
+            }
+        };
+        self.state.depth -= 1;
+        parsed
     }
 
     /// Parse one token into a node, or into the first token of its expansion.
