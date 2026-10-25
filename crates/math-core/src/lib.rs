@@ -393,6 +393,8 @@ impl LatexToMathML {
         self.state.equation_count = 0;
         self.state.label_map.clear();
         self.state.custom_cmds.clear();
+        self.state.labels.clear();
+        self.state.references.clear();
     }
 
     /// Convert a collection of LaTeX snippets to MathML.
@@ -408,26 +410,30 @@ impl LatexToMathML {
     ) -> Vec<Result<ConvertResult, Box<LatexError>>> {
         let mut state = GlobalState::default();
         let arena = Arena::new();
-        let ast_vec: Vec<ParseResult<(Vec<&Node<'_>>, &str, MathDisplay)>> = snippets
+        type Parsed<'a> = (Vec<&'a Node<'a>>, &'a str, MathDisplay, Uses);
+        let ast_vec: Vec<ParseResult<Parsed<'_>>> = snippets
             .iter()
             .map(|(latex, display)| {
                 let latex = latex.as_ref();
+                let before = Uses::before(&state);
                 parse(latex, &arena, &self.parser_cfg, &mut state, *display)
-                    .map(|ast| (ast, latex, *display))
+                    .map(|ast| (ast, latex, *display, before.until(&state)))
             })
             .collect::<Vec<_>>();
         ast_vec
             .into_iter()
             .map(|ast_result| {
-                ast_result.map(|(ast, latex, display)| {
-                    emit(
+                ast_result.map(|(ast, latex, display, uses)| {
+                    let mut result = emit(
                         ast,
                         latex,
                         display,
                         &state.label_map,
                         &arena,
                         &self.emitter_cfg,
-                    )
+                    );
+                    uses.fill(&state, &mut result);
+                    result
                 })
             })
             .collect()
@@ -442,8 +448,53 @@ fn convert(
     flags: &EmitterConfig,
 ) -> Result<ConvertResult, Box<LatexError>> {
     let arena = Arena::new();
+    let before = Uses::before(state);
     let ast = parse(latex, &arena, parser_cfg, state, display)?;
-    Ok(emit(ast, latex, display, &state.label_map, &arena, flags))
+    let mut result = emit(ast, latex, display, &state.label_map, &arena, flags);
+    before.until(state).fill(state, &mut result);
+    Ok(result)
+}
+
+/// Which of the global state's labels and references one snippet wrote: those recorded while it
+/// was parsed.
+#[derive(Clone, Copy)]
+struct Uses {
+    labels: (usize, usize),
+    references: (usize, usize),
+}
+
+impl Uses {
+    fn before(state: &GlobalState) -> Uses {
+        Uses {
+            labels: (state.labels.len(), state.labels.len()),
+            references: (state.references.len(), state.references.len()),
+        }
+    }
+
+    fn until(self, state: &GlobalState) -> Uses {
+        Uses {
+            labels: (self.labels.0, state.labels.len()),
+            references: (self.references.0, state.references.len()),
+        }
+    }
+
+    fn fill(self, state: &GlobalState, result: &mut ConvertResult) {
+        result.labels = state.labels[self.labels.0..self.labels.1]
+            .iter()
+            .map(|(name, span, tag)| Label {
+                name: String::from(name.as_str()),
+                span: span.clone(),
+                tag: tag.as_ref().map(|t| String::from(t.as_str())),
+            })
+            .collect();
+        result.references = state.references[self.references.0..self.references.1]
+            .iter()
+            .map(|(name, span)| Reference {
+                name: String::from(name.as_str()),
+                span: span.clone(),
+            })
+            .collect();
+    }
 }
 
 fn emit(
@@ -514,6 +565,8 @@ fn emit(
     ConvertResult {
         mathml: output,
         warnings,
+        labels: Vec::new(),
+        references: Vec::new(),
     }
 }
 
@@ -521,6 +574,31 @@ fn emit(
 pub struct ConvertResult {
     pub mathml: String,
     pub warnings: Warnings,
+    /// Each `\label` in the snippet, in order. A label given twice is listed twice, so that the
+    /// caller can report it.
+    pub labels: Vec<Label>,
+    /// Each `\eqref` in the snippet, in order. One whose label is never defined renders as
+    /// `(??)` and sets [`Warnings`]; this says which one it was.
+    pub references: Vec<Reference>,
+}
+
+/// A `\label` in a snippet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Label {
+    pub name: String,
+    /// Where `\label{...}` is written in the snippet.
+    pub span: Range<usize>,
+    /// The equation's tag, such as `3`, or `None` if it has no number, as in `equation*` or on a
+    /// line with `\notag`.
+    pub tag: Option<String>,
+}
+
+/// An `\eqref` in a snippet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    pub name: String,
+    /// Where `\eqref{...}` is written in the snippet.
+    pub span: Range<usize>,
 }
 
 fn parse<'arena>(

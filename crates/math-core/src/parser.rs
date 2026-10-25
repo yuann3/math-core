@@ -459,8 +459,14 @@ impl<'state, 'arena> Parser<'state, 'arena> {
                 }
             }
             Token::Label => {
-                let (label_name, _) = self.parse_string_literal()?;
+                let (label_name, arg_span) = self.parse_string_literal()?;
                 if let Some(numbered_state) = &mut self.state.env.numbered {
+                    let at = span.start..arg_span.end;
+                    self.tokens.stores.global_state.labels.push((
+                        KString::from_ref(label_name),
+                        at,
+                        None,
+                    ));
                     if numbered_state.label.is_some() {
                         Err(LatexError(span, LatexErrKind::MoreThanOneLabel))
                     } else {
@@ -1672,10 +1678,7 @@ impl<'state, 'arena> Parser<'state, 'arena> {
                             let link_target = n.label.take();
                             let info = if let Some(tag) = tag {
                                 if let Some(label) = link_target {
-                                    self.tokens.stores.global_state.label_map.insert(
-                                        KString::from_ref(label),
-                                        KString::from_ref(tag.text),
-                                    );
+                                    self.tokens.stores.global_state.tag_label(label, tag.text);
                                 }
                                 Some(
                                     self.arena
@@ -1930,10 +1933,7 @@ impl<'state, 'arena> Parser<'state, 'arena> {
                             let link_target = numbered_state.label.take();
                             let label_info = if let Some(tag) = tag {
                                 if let Some(label) = link_target {
-                                    self.tokens.stores.global_state.label_map.insert(
-                                        KString::from_ref(label),
-                                        KString::from_ref(tag.text),
-                                    );
+                                    self.tokens.stores.global_state.tag_label(label, tag.text);
                                 }
                                 Some(
                                     self.arena
@@ -1960,7 +1960,13 @@ impl<'state, 'arena> Parser<'state, 'arena> {
                 }
             }
             Token::EqRef => {
-                let (label_name, _) = self.parse_string_literal()?;
+                let (label_name, arg_span) = self.parse_string_literal()?;
+                let at = Range::from(span).start..arg_span.end;
+                self.tokens
+                    .stores
+                    .global_state
+                    .references
+                    .push((KString::from_ref(label_name), at));
                 Ok(Node::EqRef(label_name))
             }
             Token::Cramped => {
