@@ -13,6 +13,7 @@
 //!
 //! [1]: https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
 use alloc::{vec, vec::Vec};
+use core::cell::Cell;
 
 use crate::parser::node_vec_to_node;
 use mathml_renderer::arena::Arena;
@@ -57,9 +58,16 @@ pub fn enrich<'arena>(
     arena: &'arena Arena,
     input: &'_ [&'arena Node<'arena>],
 ) -> Vec<&'arena Node<'arena>> {
-    let mut lhs: EnrichParseResult<'arena> = enrich_formula(arena, input, 0);
+    // An opener with no closer is parsed twice: once by `enrich_bracketed`,
+    // which fails at the end, and again as an atom. Each unmatched opener
+    // nested in another's attempt doubles the work, so a formula of many
+    // `[` takes exponential time. The fuel caps the calls at a multiple of
+    // the input, enough for a few unmatched openers; past that, the
+    // formula is left without invisible operators.
+    let fuel = &Cell::new(ENRICH_FUEL_PER_NODE * input.len() + ENRICH_FUEL_PER_NODE);
+    let mut lhs: EnrichParseResult<'arena> = enrich_formula(arena, input, 0, fuel);
     while lhs.consumed < input.len() {
-        let rhs: EnrichParseResult = enrich_formula(arena, &input[lhs.consumed..], 0);
+        let rhs: EnrichParseResult = enrich_formula(arena, &input[lhs.consumed..], 0, fuel);
         if rhs.consumed == 0 {
             // Failed to parse. Just add it to the end and keep going.
             if let Some(lhs_replaced_with) = lhs.replaced_with.as_mut() {
@@ -84,9 +92,15 @@ pub fn enrich<'arena>(
         lhs.consumed += rhs.consumed;
     }
 
+    if fuel.get() == 0 {
+        return input.to_vec();
+    }
     lhs.replaced_with
         .unwrap_or_else(|| input[..lhs.consumed].to_vec())
 }
+
+/// How many calls to `enrich_formula` a formula may make per node.
+const ENRICH_FUEL_PER_NODE: usize = 16;
 
 /// Enriches a single formula.
 ///
@@ -95,7 +109,17 @@ fn enrich_formula<'tmp, 'arena>(
     arena: &'arena Arena,
     input: &'tmp [&'arena Node<'arena>],
     min_bp: u8,
+    fuel: &Cell<usize>,
 ) -> EnrichParseResult<'arena> {
+    // Out of fuel, consume the rest, so that every caller returns at once;
+    // `enrich` then throws the result away.
+    let Some(left) = fuel.get().checked_sub(1) else {
+        return EnrichParseResult {
+            consumed: input.len(),
+            replaced_with: None,
+        };
+    };
+    fuel.set(left);
     let mut lhs: EnrichParseResult<'arena> = {
         let mut lhs = EnrichParseResult {
             consumed: 0,
@@ -109,11 +133,13 @@ fn enrich_formula<'tmp, 'arena>(
         if lhs.consumed >= input.len() {
             return lhs;
         }
-        let new_lhs = if let Some(lhs_bracketed) = enrich_bracketed(arena, &input[lhs.consumed..]) {
+        let new_lhs = if let Some(lhs_bracketed) =
+            enrich_bracketed(arena, &input[lhs.consumed..], fuel)
+        {
             lhs_bracketed
-        } else if let Some(lhs_prefix) = enrich_prefix(arena, &input[lhs.consumed..]) {
+        } else if let Some(lhs_prefix) = enrich_prefix(arena, &input[lhs.consumed..], fuel) {
             lhs_prefix
-        } else if let Some(lhs_fn) = enrich_pseudo_operator(arena, &input[lhs.consumed..]) {
+        } else if let Some(lhs_fn) = enrich_pseudo_operator(arena, &input[lhs.consumed..], fuel) {
             lhs_fn
         } else if infix_binding_power(input[lhs.consumed]).is_some() {
             // Bust out if this is an infix operator.
@@ -175,7 +201,7 @@ fn enrich_formula<'tmp, 'arena>(
                 (bp_r, false)
             };
             let rhs: EnrichParseResult<'arena> =
-                enrich_formula(arena, &input[lhs.consumed..], bp_r);
+                enrich_formula(arena, &input[lhs.consumed..], bp_r, fuel);
             if lhs.replaced_with.is_some() || rhs.replaced_with.is_some() {
                 let mut lhs_replaced_with = lhs
                     .replaced_with
@@ -205,6 +231,7 @@ fn enrich_formula<'tmp, 'arena>(
 fn enrich_bracketed<'tmp, 'arena>(
     arena: &'arena Arena,
     input: &'tmp [&'arena Node<'arena>],
+    fuel: &Cell<usize>,
 ) -> Option<EnrichParseResult<'arena>> {
     if input.is_empty() {
         return None;
@@ -222,7 +249,7 @@ fn enrich_bracketed<'tmp, 'arena>(
     // operator when it's unmatched.
     //
     // So, if we set min_bp to 1, enrich_formula will return control back to us if it finds one.
-    let rhs: EnrichParseResult<'arena> = enrich_formula(arena, &input[lhs.consumed..], 1);
+    let rhs: EnrichParseResult<'arena> = enrich_formula(arena, &input[lhs.consumed..], 1, fuel);
     let close = match operator(input.get(lhs.consumed + rhs.consumed)?)? {
         Node::Operator { roles, .. } if roles.contains(OpRoles::ROLE_CLOSE) => {
             input[lhs.consumed + rhs.consumed]
@@ -250,6 +277,7 @@ fn enrich_bracketed<'tmp, 'arena>(
 fn enrich_prefix<'tmp, 'arena>(
     arena: &'arena Arena,
     input: &'tmp [&'arena Node<'arena>],
+    fuel: &Cell<usize>,
 ) -> Option<EnrichParseResult<'arena>> {
     if input.is_empty() {
         return None;
@@ -260,7 +288,7 @@ fn enrich_prefix<'tmp, 'arena>(
     };
     let ((), bp_r) = prefix_binding_power(input.get(lhs.consumed)?)?;
     lhs.consumed += 1;
-    let rhs: EnrichParseResult<'arena> = enrich_formula(arena, &input[lhs.consumed..], bp_r);
+    let rhs: EnrichParseResult<'arena> = enrich_formula(arena, &input[lhs.consumed..], bp_r, fuel);
     if let Some(rhs_replaced_with) = rhs.replaced_with {
         // lhs.replaced_with is definitely None
         lhs.replaced_with = Some(
@@ -278,6 +306,7 @@ fn enrich_prefix<'tmp, 'arena>(
 fn enrich_pseudo_operator<'tmp, 'arena>(
     arena: &'arena Arena,
     input: &'tmp [&'arena Node<'arena>],
+    fuel: &Cell<usize>,
 ) -> Option<EnrichParseResult<'arena>> {
     if let (
         identifier,
@@ -299,6 +328,7 @@ fn enrich_pseudo_operator<'tmp, 'arena>(
             arena,
             &input[lhs.consumed..],
             PREFIX_BINDING_POWER_PSEUDO_OPERATOR.1,
+            fuel,
         );
         let nodes = match rhs.replaced_with {
             Some(nodes) => nodes,
