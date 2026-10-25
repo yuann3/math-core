@@ -346,7 +346,7 @@ impl LatexErrKind {
             LatexErrKind::TooManyExpansions => {
                 write!(
                     s,
-                    "Too many expansions of custom commands. A command may be expanding to itself."
+                    "Too many expansions of custom commands, or too long a result. A command may be expanding to itself."
                 )?;
             }
             LatexErrKind::Internal => {

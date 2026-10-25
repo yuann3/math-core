@@ -493,6 +493,11 @@ impl<'state, 'arena> TokenQueue<'state, 'arena> {
         }
     }
 
+    /// How many tokens are queued.
+    pub(super) fn queued(&self) -> usize {
+        self.queue.len()
+    }
+
     /// Queue a stream of tokens in the front of the buffer.
     ///
     /// We use a ring buffer, so this is efficient as long as the number of tokens is not too large.

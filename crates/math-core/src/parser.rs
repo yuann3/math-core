@@ -2453,13 +2453,16 @@ impl<'state, 'arena> Parser<'state, 'arena> {
             Token::CustomCmd(num_args, token_stream) => {
                 self.count_expansion(span)?;
                 self.read_cmd_args(num_args)?;
+                let before = self.tokens.queued();
                 self.tokens
                     .queue_body_substituting(token_stream, &self.state.cmd_args, span);
+                self.charge_expansion(before, span)?;
                 return Ok(Parsed::Expansion);
             }
             Token::CustomCmdRef(source, num_args, _, start, end) => {
                 self.count_expansion(span)?;
                 self.read_cmd_args(num_args)?;
+                let before = self.tokens.queued();
                 if !self.tokens.queue_stored_body_substituting(
                     source,
                     start,
@@ -2469,6 +2472,7 @@ impl<'state, 'arena> Parser<'state, 'arena> {
                 ) {
                     return Err(Box::new(LatexError(span.into(), LatexErrKind::Internal)));
                 }
+                self.charge_expansion(before, span)?;
                 return Ok(Parsed::Expansion);
             }
             Token::CustomCmdArgInput(_) => Err(LatexError(
@@ -2840,6 +2844,21 @@ impl<'state, 'arena> Parser<'state, 'arena> {
         };
         self.state.expansions_left = left;
         Ok(())
+    }
+
+    /// Account for the tokens an expansion queued, `before` being how many were queued before
+    /// it, and give up if expansions have produced too many. See
+    /// [`GlobalState::charge_expansion`](crate::global_state::GlobalState::charge_expansion).
+    fn charge_expansion(&mut self, before: usize, span: Span) -> ParseResult<()> {
+        let tokens = self.tokens.queued().saturating_sub(before);
+        if self.tokens.stores.global_state.charge_expansion(tokens) {
+            Ok(())
+        } else {
+            Err(Box::new(LatexError(
+                span.into(),
+                LatexErrKind::TooManyExpansions,
+            )))
+        }
     }
 
     /// Read the arguments of a custom command, ready to be substituted into its body.

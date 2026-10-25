@@ -395,6 +395,8 @@ impl LatexToMathML {
         self.state.custom_cmds.clear();
         self.state.labels.clear();
         self.state.references.clear();
+        self.state.written = 0;
+        self.state.expanded = 0;
     }
 
     /// Convert a collection of LaTeX snippets to MathML.
@@ -612,6 +614,7 @@ fn parse<'arena>(
         MathDisplay::Inline => Style::Text,
         MathDisplay::Block => Style::Display,
     };
+    state.written = state.written.saturating_add(latex.len());
     let lexer = Lexer::new(latex);
     let mut p = Parser::new(lexer, arena, parser_cfg, state, style)?;
     let nodes = p.parse()?;
